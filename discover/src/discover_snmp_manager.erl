@@ -139,12 +139,7 @@ parse_opts(Opts) ->
                {max_message_size, MMS}],
 
     %% Manager options
-    MibsDir = filename:join(code:priv_dir(snmp), "mibs"),
-    {ok, MibFiles} = file:list_dir(MibsDir),
-
-    MibsDef = [ filename:join(MibsDir, MibFile) || MibFile <- MibFiles ],
-
-    Mibs      = get_opt(mibs,     Opts, MibsDef),
+    Mibs      = get_opt(mibs,     Opts, []),
     Vsns      = get_opt(versions, Opts, [v1, v2, v3]),
     {ok, Cwd} = file:get_cwd(),
     Dir       = get_opt(dir, Opts, Cwd),
