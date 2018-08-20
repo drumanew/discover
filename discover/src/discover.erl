@@ -17,20 +17,39 @@ main(_) ->
   
 %% Private
 
-discover(Devs, OidGroups) ->
-  discover(Devs, OidGroups, []).
+discover(Devs, OldGroups) ->
+  Self = self(),
+  Pids = [ erlang:spawn(fun () -> discover_one(Dev, OldGroups, Self) end) || Dev <- Devs ],
+  Data = receive_data(Pids),
+  {ok, Data}.
 
-discover([], _, Data) ->
-  {ok, lists:reverse(Data)};
+receive_data(Pids) ->
+  receive_data(Pids, []).
 
-discover([Dev | Devs], OidGroups, AccData) ->
+receive_data([], Data) ->
+  Data;
+receive_data(Pids, Acc) ->
+  receive
+    {Pid, Result} when is_pid(Pid) ->
+      case lists:member(Pid, Pids) of
+        true ->
+          case Result of
+            {Dev, {ok, Data}} ->
+              receive_data(Pids -- [Pid], [{Dev, Data} | Acc]);
+            {Dev, {error, Err}} ->
+              receive_data(Pids -- [Pid], [{Dev, Err} | Acc])
+          end
+      end
+  end.
+
+discover_one(Dev, OidGroups, Parent) ->
   case catch parse_dev_config(Dev, OidGroups) of
     {ok, AgentName, AgentOpts, Oids} ->
       ok = discover_snmp_manager:agent(AgentName, AgentOpts),
       Data = get_data(AgentName, Oids),
-      discover(Devs, OidGroups, [ {Dev, Data} | AccData ]);
-    {error, _Error} ->
-      discover(Devs, OidGroups, AccData)
+      Parent ! {self(), {Dev, {ok, Data}}};
+    {error, Error} ->
+      Parent ! {self(), {Dev, {error, Error}}}
   end.
 
 parse_dev_config({RawIP, RawOids}, OidGroups) ->
