@@ -35,9 +35,9 @@ receive_data(Pids, Acc) ->
         true ->
           case Result of
             {Dev, {ok, Data}} ->
-              receive_data(Pids -- [Pid], [{Dev, Data} | Acc]);
+              receive_data(Pids -- [Pid], [format(Dev, Data) | Acc]);
             {Dev, {error, Err}} ->
-              receive_data(Pids -- [Pid], [{Dev, Err} | Acc])
+              receive_data(Pids -- [Pid], [format_err(Dev, Err) | Acc])
           end
       end
   end.
@@ -102,6 +102,26 @@ make_name(IP) ->
 
 get_data(Agent, Oids) ->
   discover_snmp_manager:sync_get_next(Agent, Oids).
+
+format(Dev, Data) ->
+  RawIp = element(1, Dev),
+  {RawIp, format_data(Data)}.
+
+format_err(Dev, Err) ->
+  RawIp = element(1, Dev),
+  {RawIp, Err}.
+
+format_data({error, Reason}) ->
+  Reason;
+
+format_data({ok, SnmpReply, _Remaining}) ->
+  format_snmp_reply(SnmpReply).
+
+format_snmp_reply({noError, _ErrIndex, VarBinds}) ->
+  VarBinds;
+
+format_snmp_reply({ErrStatus, _ErrIndex, VarBinds}) ->
+  {ErrStatus, VarBinds}.
 
 write_data(Data, IODev) ->
   io:format(IODev, "~p~n", [Data]).
