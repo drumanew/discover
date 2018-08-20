@@ -13,6 +13,10 @@
          sync_get_next/2, 
          sync_get_bulk/4, 
          sync_set/2,
+         async_get/2,
+         async_get_next/2,
+         async_get_bulk/4,
+         async_set/2,
          oid_to_name/1
         ]).
 
@@ -40,7 +44,7 @@
 -define(USER,     ?MODULE).
 -define(USER_MOD, ?MODULE).
 
--record(state, {parent}).
+-record(state, {parent, queue = gb_trees:empty()}).
 
 %%%-------------------------------------------------------------------
 %%% API
@@ -76,6 +80,17 @@ sync_get_bulk(TargetName, NR, MR, Oids) ->
 sync_set(TargetName, VarsAndVals) ->
     call({sync_set, TargetName, VarsAndVals}).
 
+async_get(TargetName, Oids) ->
+    call({async_get, TargetName, Oids}).
+
+async_get_next(TargetName, Oids) ->
+    call({async_get_next, TargetName, Oids}).
+
+async_get_bulk(TargetName, NR, MR, Oids) ->
+    call({async_get_bulk, TargetName, NR, MR, Oids}).
+
+async_set(TargetName, VarsAndVals) ->
+    call({async_set, TargetName, VarsAndVals}).
 
 %% --- Misc utility functions ---
 
@@ -186,6 +201,22 @@ handle_call({sync_set, TargetName, VarsAndVals}, _From, S) ->
     Reply = (catch snmpm:sync_set(?USER, TargetName, VarsAndVals)),
     {reply, Reply, S};
 
+handle_call({async_get, TargetName, Oids}, From, S = #state{ queue = Q }) ->
+    {ok, ReqId} = snmpm:async_get(?USER, TargetName, Oids),
+    {noreply, S#state{ queue = gb_trees:insert(ReqId, From, Q) }};
+
+handle_call({async_get_next, TargetName, Oids}, From, S = #state{ queue = Q }) ->
+    {ok, ReqId} = snmpm:async_get_next(?USER, TargetName, Oids),
+    {noreply, S#state{ queue = gb_trees:insert(ReqId, From, Q)} };
+
+handle_call({async_get_bulk, TargetName, NR, MR, Oids}, From, S = #state{ queue = Q }) ->
+    {ok, ReqId} = snmpm:async_get_bulk(?USER, TargetName, NR, MR, Oids),
+    {noreply, S#state{ queue = gb_trees:insert(ReqId, From, Q)} };
+
+handle_call({async_set, TargetName, VarsAndVals}, From, S = #state{ queue = Q }) ->
+    {ok, ReqId} = snmpm:async_set(?USER, TargetName, VarsAndVals),
+    {noreply, S#state{ queue = gb_trees:insert(ReqId, From, Q)} };
+
 handle_call(Req, From, State) ->
     error_msg("received unknown request ~n~p~nFrom ~p", [Req, From]),
     {reply, {error, {unknown_request, Req}}, State}.
@@ -213,8 +244,8 @@ handle_cast(Msg, State) ->
 %%          {stop, Reason, State}            (terminate/2 is called)
 %%--------------------------------------------------------------------
 handle_info({snmp_callback, Tag, Info}, State) ->
-    handle_snmp_callback(Tag, Info),
-    {noreply, State};
+    {ok, NewState} = handle_snmp_callback(Tag, Info, State),
+    {noreply, NewState};
 
 handle_info(Info, State) ->
     error_msg("received unknown info: "
@@ -242,15 +273,21 @@ code_change(_Vsn, State, _Extra) ->
 %% ========================================================================
 %% ========================================================================
 
-handle_snmp_callback(handle_error, {ReqId, Reason}) ->
-    io:format("*** FAILURE ***"
+handle_snmp_callback(handle_error, {ReqId, Reason}, State = #state{ queue = Q }) ->
+    log("*** FAILURE ***"
 	      "~n   Request Id: ~p"
 	      "~n   Reason:     ~p"
 	      "~n", [ReqId, Reason]),
-    ok;
-handle_snmp_callback(handle_agent, {Addr, Port, Type, SnmpInfo}) ->
+    case gb_trees:lookup(ReqId, Q) of
+        none ->
+            {ok, State};
+        {value, From} ->
+            reply(From, {error, Reason}),
+            {ok, State#state{ queue = gb_trees:delete(ReqId, Q) }}
+    end;
+handle_snmp_callback(handle_agent, {Addr, Port, Type, SnmpInfo}, State) ->
     {ES, EI, VBs} = SnmpInfo, 
-    io:format("*** UNKNOWN AGENT ***"
+    log("*** UNKNOWN AGENT ***"
 	      "~n   Address:   ~p"
 	      "~n   Port:      ~p"
 	      "~n   Type:      ~p"
@@ -259,10 +296,10 @@ handle_snmp_callback(handle_agent, {Addr, Port, Type, SnmpInfo}) ->
 	      "~n     Error Index:  ~w"
 	      "~n     Varbinds:     ~p"
 	      "~n", [Addr, Port, Type, ES, EI, VBs]),
-    ok;
-handle_snmp_callback(handle_pdu, {TargetName, ReqId, SnmpResponse}) ->
+    {ok, State};
+handle_snmp_callback(handle_pdu, {TargetName, ReqId, SnmpResponse}, State = #state{ queue = Q }) ->
     {ES, EI, VBs} = SnmpResponse, 
-    io:format("*** Received PDU ***"
+    log("*** Received PDU ***"
 	      "~n   TargetName: ~p"
 	      "~n   Request Id: ~p"
 	      "~n   SNMP response:"
@@ -270,8 +307,14 @@ handle_snmp_callback(handle_pdu, {TargetName, ReqId, SnmpResponse}) ->
 	      "~n     Error Index:  ~w"
 	      "~n     Varbinds:     ~p"
 	      "~n", [TargetName, ReqId, ES, EI, VBs]),
-    ok;
-handle_snmp_callback(handle_trap, {TargetName, SnmpTrap}) ->
+    case gb_trees:lookup(ReqId, Q) of
+        none ->
+            {ok, State};
+        {value, From} ->
+            reply(From, SnmpResponse),
+            {ok, State#state{ queue = gb_trees:delete(ReqId, Q) }}
+    end;
+handle_snmp_callback(handle_trap, {TargetName, SnmpTrap}, State) ->
     TrapStr = 
 	case SnmpTrap of
 	    {Enteprise, Generic, Spec, Timestamp, Varbinds} ->
@@ -287,37 +330,37 @@ handle_snmp_callback(handle_trap, {TargetName, SnmpTrap}) ->
 			      "~n     Varbinds:     ~p"
 			      "~n", [ErrorStatus, ErrorIndex, Varbinds])
 	end,
-    io:format("*** Received TRAP ***"
+    log("*** Received TRAP ***"
 	      "~n   TargetName: ~p"
 	      "~n   SNMP trap:  ~s"
 	      "~n", [TargetName, lists:flatten(TrapStr)]),
-    ok;
-handle_snmp_callback(handle_inform, {TargetName, SnmpInform}) ->
+    {ok, State};
+handle_snmp_callback(handle_inform, {TargetName, SnmpInform}, State) ->
     {ES, EI, VBs} = SnmpInform, 
-    io:format("*** Received INFORM ***"
+    log("*** Received INFORM ***"
 	      "~n   TargetName: ~p"
 	      "~n   SNMP inform: "
 	      "~n     Error Status: ~w"
 	      "~n     Error Index:  ~w"
 	      "~n     Varbinds:     ~p"
 	      "~n", [TargetName, ES, EI, VBs]),
-    ok;
-handle_snmp_callback(handle_report, {TargetName, SnmpReport}) ->
+    {ok, State};
+handle_snmp_callback(handle_report, {TargetName, SnmpReport}, State) ->
     {ES, EI, VBs} = SnmpReport, 
-    io:format("*** Received REPORT ***"
+    log("*** Received REPORT ***"
 	      "~n   TargetName: ~p"
 	      "~n   SNMP report: "
 	      "~n     Error Status: ~w"
 	      "~n     Error Index:  ~w"
 	      "~n     Varbinds:     ~p"
 	      "~n", [TargetName, ES, EI, VBs]),
-    ok;
-handle_snmp_callback(BadTag, Crap) ->
-    io:format("*** Received crap ***"
+    {ok, State};
+handle_snmp_callback(BadTag, Crap, State) ->
+    log("*** Received crap ***"
 	      "~n   ~p"
 	      "~n   ~p"
 	      "~n", [BadTag, Crap]),
-    ok.
+    {ok, State}.
     
 
 
@@ -335,6 +378,14 @@ call(Req) ->
 cast(Msg) ->
     gen_server:cast(?SERVER, Msg).
 
+reply(From, Msg) ->
+    gen_server:reply(From, Msg).
+
+log(Format) ->
+  log(Format, []).
+
+log(Format, Args) ->
+  io:format(standard_error, Format, Args).
 
 %% ========================================================================
 %% Misc internal utility functions
