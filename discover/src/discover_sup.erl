@@ -28,7 +28,13 @@ start_link() ->
 
 %% Child :: {Id,StartFunc,Restart,Shutdown,Type,Modules}
 init([]) ->
-    {ok, { {one_for_all, 0, 1}, []} }.
+    ChildSpecs = [{discover_snmp_manager,
+                   {discover_snmp_manager, start_link, []},
+                   permanent,
+                   5000,
+                   worker,
+                   [discover_snmp_manager]}],
+    {ok, { {one_for_all, 0, 1}, ChildSpecs} }.
 
 %%====================================================================
 %% Internal functions
